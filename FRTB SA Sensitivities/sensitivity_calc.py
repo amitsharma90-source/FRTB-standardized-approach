@@ -748,9 +748,9 @@ def calc_commodity_trs_girr_delta(inst, mkt, cfg):
             continue
         bumped_handle = _build_bumped_curve(mkt['ql_val_date'], mkt['usd_rates'], bt)
         pv01 = (_price_bond_ql(bond, bumped_handle, 0) - pv_base) * scale / BUMP
-        # Negate: bank pays this leg (rising rates → higher cost → negative sensitivity)
-        # if abs(pv01) > 0.01:
-        #     sens[f"GIRR_USD_{bt}Y"] = -pv01
+        
+        if abs(pv01) > 0.01:
+            sens[f"GIRR_USD_{bt}Y"] = pv01
 
     return sens
 
@@ -846,7 +846,8 @@ def calc_xccy_gbp_leg_girr(inst, mkt, cfg):
         if bt > mat_yrs + 2: continue
         bumped_handle = _build_bumped_curve(mkt['ql_val_date'], rates_dict, bt)
         pv01 = (_price_bond_ql(bond, bumped_handle, 0) - pv_base) * scale / 0.0001   # MAR21.19: divide by 0.0001
-
+        if abs(pv01) > 0.01:
+            sens[f"GIRR_GBP_{bt}Y"] = pv01
 
     # 2. XCcy basis sensitivity: flat +1bp shift on entire GBP curve [MAR21.8(3)]
     # Basis is a flat spread over SONIA; sensitivity is the BPV of the full GBP leg.
@@ -855,7 +856,9 @@ def calc_xccy_gbp_leg_girr(inst, mkt, cfg):
         mkt['ql_val_date'], rates_dict, 0.0001)
     pv_basis_bumped = _price_bond_ql(bond, bumped_basis_handle, 0) * scale
     basis_sens = (pv_basis_bumped - pv_base * scale) / 0.0001   # MAR21.8(3): divide by 0.0001
-   
+    if abs(basis_sens) > 0.01:
+        sens["GIRR_GBP_XCCY_BASIS"] = basis_sens
+
     # 3. FX delta: USD equivalent of GBP notional [MAR21.24]
     sens["FX_GBP/USD"] = notional_usd   # short USD (pay USD to receive GBP)
 
