@@ -3,6 +3,7 @@ FRTB SA — Module 1: Data Loader (v6)
 - Curves interpolated to FRTB tenors only (no non-FRTB tenors like 7Y)
 - All constants loaded from MAR21_Config_RW_Corr.xlsx (no hardcoding)
 """
+import os
 import pandas as pd
 import numpy as np
 import QuantLib as ql
@@ -115,7 +116,7 @@ def load_portfolio(filepath: str) -> pd.DataFrame:
     df['ID'] = df['ID'].astype(int)
     df = df.set_index('ID')
     for col in ['Quantity/Notional', 'Market Value ($)', 'Coupon/Rate (%)',
-                'Strike Price', 'Option Premium', 'Spread (bps)',
+                'Strike Price', 'Spread (bps)',
                 'Attachment Pt (%)', 'Detachment Pt (%)']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -347,18 +348,32 @@ def get_issuer_spread_curve(mkt: dict, issuer_name: str, rating: str, issue_type
         return {0.5: flat_oas, 1: flat_oas, 3: flat_oas, 5: flat_oas, 10: flat_oas}
     return {}
 
+SEC_CONFIG_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "..", "..", "Input data", "FRTB_Sec_Config.xlsx",
+))
+
+
 def _load_tranche_curves(filepath: str, csr_tenors: list) -> dict:
-    """Load manufactured tranche spread curves from Sec_Tranche_Curves sheet.
+    """Load manufactured tranche spread curves from the Sec_Tranche_Curves sheet.
+
+    Source: FRTB_Sec_Config.xlsx (FRTB SA folder). The sheet was previously
+    in market_data_snapshot_5Feb2026.xlsx but moved to consolidate all
+    securitisation metadata in a single canonical workbook.
+
+    The `filepath` argument is kept for backward compatibility but ignored;
+    the sheet is now always read from SEC_CONFIG_PATH.
+
     Returns dict: {instrument_id: {0.5: spread_decimal, 1: ..., 3: ..., 5: ..., 10: ...}}
 
     Reads by header name (not column index) so the loader is robust to schema
-    changes in the snapshot file. Spreads are stored in bp in the sheet and
+    changes in the source file. Spreads are stored in bp in the sheet and
     converted to decimal here. See CSR_Sec_NonCTP_Methodology.docx for the
     Level 3 construction methodology (anchor + thinness + term shape).
     """
     try:
         # Header is at row 7 in the Sec_Tranche_Curves sheet (rows 1-6 are metadata)
-        df = pd.read_excel(filepath, sheet_name="Sec_Tranche_Curves", header=6)
+        df = pd.read_excel(SEC_CONFIG_PATH, sheet_name="Sec_Tranche_Curves", header=6)
         df = df[pd.to_numeric(df.get('ID', pd.Series()), errors='coerce').notna()].copy()
         df['ID'] = df['ID'].astype(int)
 
