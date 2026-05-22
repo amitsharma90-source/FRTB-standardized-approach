@@ -22,6 +22,9 @@ from sensitivity_calc import (
     calc_il_gilt_sensitivities, calc_fx_delta,
     years_between
 )
+from mv_decompose import (
+    single_leg_row, decompose_callable_legs, decompose_spx_legs, sort_rows,
+)
 
 def build_instrument_dict(row, mkt) -> dict:
     """Convert a portfolio DataFrame row to a clean dict for calculators."""
@@ -52,7 +55,6 @@ def build_instrument_dict(row, mkt) -> dict:
         'asset_class': str(row.get('Asset Class', '')),
         'risk_measures': str(row.get('FRTB Risk Measures', '')),
         'underlying': str(row.get('Underlying', '')) if pd.notna(row.get('Underlying')) else '',
-        'tranche_type': str(row.get('Tranche Type', '')) if pd.notna(row.get('Tranche Type')) else '',
         'pool_id': str(row.get('Pool ID', '')) if pd.notna(row.get('Pool ID')) else '',
         'pool_type': str(row.get('Underlying Pool Type', '')) if pd.notna(row.get('Underlying Pool Type')) else 'RMBS',
         'attach_pt': _num('Attachment Pt (%)', 0),
@@ -85,65 +87,55 @@ def build_instrument_dict(row, mkt) -> dict:
     return inst
 
 
+# Equity index keywords for disambiguating index options from single-name options.
+# Mirrors drc_nonsecuritisation/nonsec_decompose._INDEX_KEYWORDS so the two phases
+# detect index-vs-single-name on the same rule.
+_EQUITY_INDEX_KEYWORDS = ("index", "spx", "s&p", "nasdaq", "russell", "dow")
+
+
 def classify_instrument(inst: dict) -> str:
-    """Determine instrument type from portfolio fields."""
-    rc = inst['risk_class'].upper()
-    sec = inst['security'].upper()
-    issue = inst['issue_type'].upper() if inst['issue_type'] else ''
-    asset = inst['asset_class'].upper() if inst['asset_class'] else ''
-    
-    # Government bonds
-    if 'TBILL' in sec or 'TREASURY' in sec:
-        return 'GOV_BOND'
-    
-    # Callable corporate bonds
-    if pd.notna(inst['call_date']) and inst['call_date'] is not None:
-        try:
-            if not pd.isna(inst['call_date']):
-                return 'CALLABLE_BOND'
-        except:
-            pass
-    
-    # Plain corporate bonds
-    if 'CSR_NONSEC' in rc and ('BOND' in sec or 'GIRR' in rc):
-        return 'CORP_BOND'
-    
-    # Equities
-    if 'EQUITY' in rc and 'SPX' not in sec and 'CALL' not in sec.upper():
-        return 'EQUITY_SPOT'
-    
-    # SPX options
-    if 'SPX' in sec or ('EQUITY' in rc and ('CALL' in sec or 'PUT' in sec)):
-        return 'SPX_OPTION'
-    
-    # Securitisations
-    if 'CSR_SEC' in rc:
+    """Route a portfolio row to a sensitivity calculator using the canonical
+    (Position Type, Issue Type) schema. Disambiguators are limited to other
+    structured fields (Currency, Underlying); Security-name substring matches
+    are not used."""
+    pt = (inst['position_type'] or '').strip()
+    it = (inst['issue_type'] or '').strip()
+    underlying = (inst['underlying'] or '').lower()
+    ccy = (inst['currency'] or '').strip().upper()
+
+    if pt == 'Bond':
+        if it == 'Gov':
+            return 'GOV_BOND'
+        if it == 'IL Gilt':
+            return 'IL_GILT'
+        if it == 'Callable Bond':
+            return 'CALLABLE_BOND'
+        if it == 'Corp':
+            return 'CORP_BOND'
+
+    if pt == 'Equity':
+        if it == 'Corp':
+            return 'EQUITY_SPOT'
+        if it == 'Call Option':
+            if any(k in underlying for k in _EQUITY_INDEX_KEYWORDS):
+                return 'SPX_OPTION'
+            return 'EQUITY_SINGLE_NAME_OPTION'
+
+    if pt == 'Securitisation':
         return 'SECURITISATION'
-    
-    # Commodity TRS receive legs
-    if 'COMM' in rc and 'BCOMTR' in rc:
-        return 'COMMODITY_TRS_RECEIVE'
-    
-    # SOFR pay legs
-    if 'GIRR:USD' in rc and inst['underlying'] and 'SOFR' in inst['underlying'].upper():
-        return 'COMMODITY_TRS_SOFR'
-    
-    # XCcy swap USD leg
-    if 'GIRR:USD' in rc and 'XCCY' in sec.upper():
-        return 'XCCY_USD_LEG'
-    
-    # XCcy swap GBP leg
-    if 'GIRR:GBP' in rc and ('XCCY' in sec.upper() or 'XCCY_BASIS' in rc):
-        return 'XCCY_GBP_LEG'
-    
-    # IL Gilts
-    if 'INFLATION' in rc or 'IL GILT' in sec or 'UKTI' in sec:
-        return 'IL_GILT'
-    
-    # Fallback
-    if 'GIRR' in rc:
-        return 'CORP_BOND'
-    
+
+    if pt == 'TRS':
+        if 'sofr' in underlying:
+            return 'COMMODITY_TRS_SOFR'
+        if 'bcom' in underlying or 'commodity' in underlying:
+            return 'COMMODITY_TRS_RECEIVE'
+
+    if pt == 'FXSwap':
+        if ccy == 'USD':
+            return 'XCCY_USD_LEG'
+        if ccy == 'GBP':
+            return 'XCCY_GBP_LEG'
+
     return 'UNKNOWN'
 
 
@@ -164,7 +156,9 @@ def compute_all_sensitivities(portfolio_path: str, market_data_path: str,
     
     # Process each instrument
     all_results = []
-    
+    mv_rows = []
+    parent_totals: dict[int, float] = {}
+
     for idx, row in port.iterrows():
         inst = build_instrument_dict(row, mkt)
         inst_type = classify_instrument(inst)
@@ -277,6 +271,26 @@ def compute_all_sensitivities(portfolio_path: str, market_data_path: str,
         else:
             sens_definition = f"UNKNOWN TYPE: {inst_type}"
         
+        # ── Sheet 2 MV emit (Portfolio_MV_Decomposed) ─────────────────────────
+        # Each calculator that ran has stashed `_computed_mv` (signed model NPV
+        # in USD) and `_pricing_model` on `inst`. For decomposed instruments
+        # (callable bonds, equity index options) we expand to multi-leg rows
+        # here using the prices already computed during sensitivity calc.
+        if inst_type == 'CALLABLE_BOND':
+            legs, parent_total = decompose_callable_legs(row, inst, mkt)
+            mv_rows.extend(legs)
+            parent_totals[inst['id']] = parent_total
+        elif inst_type == 'SPX_OPTION':
+            legs, parent_total = decompose_spx_legs(row, inst)
+            mv_rows.extend(legs)
+            parent_totals[inst['id']] = parent_total
+        elif inst_type != 'UNKNOWN' and '_computed_mv' in inst:
+            mv_signed = float(inst['_computed_mv'])
+            mv_rows.append(single_leg_row(
+                row, inst, mv_signed,
+                inst.get('_pricing_model', 'unknown')))
+            parent_totals[inst['id']] = mv_signed
+
         # Build result row
         result = {
             'ID': inst['id'],
@@ -291,11 +305,14 @@ def compute_all_sensitivities(portfolio_path: str, market_data_path: str,
     # Convert to DataFrame
     df = pd.DataFrame(all_results)
     df = df.set_index('ID')
-    
+
     # Fill NaN sensitivities with 0
-    sens_cols = [c for c in df.columns if c not in 
-                 ['Security', 'Instrument_Type', 'Sensitivity_Definition'] 
+    sens_cols = [c for c in df.columns if c not in
+                 ['Security', 'Instrument_Type', 'Sensitivity_Definition']
                  and c not in risk_flags.keys()]
     df[sens_cols] = df[sens_cols].fillna(0)
-    
-    return df
+
+    # Sheet 2 rows in deterministic order
+    mv_rows = sort_rows(mv_rows)
+
+    return df, mv_rows, parent_totals

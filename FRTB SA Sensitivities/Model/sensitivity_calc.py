@@ -122,7 +122,9 @@ def calc_bond_girr_delta(inst, mkt, cfg):
 
     bond, scale = _build_ql_bond(notional, coupon, inst['maturity'], freq, inst.get('issue_date'))
     pv_base = _price_bond_ql(bond, base_handle, spread)
-    inst['_computed_mv'] = pv_base * scale
+    fx_to_usd = mkt['usd_gbp'] if ccy == 'GBP' else 1.0
+    inst['_computed_mv'] = pv_base * scale * fx_to_usd
+    inst['_pricing_model'] = 'QL_FixedRateBond_discount_curve'
 
     sens = {}
     for bt in girr_tenors:
@@ -228,7 +230,9 @@ def calc_callable_bond_girr_delta(inst, mkt, cfg):
         inst['notional'], coupon, inst['maturity'], inst['call_date'],
         inst.get('freq', 2), base_handle, cfg, inst.get('issue_date'))
     pv_base = bond_base.NPV()
-    inst['_computed_mv'] = pv_base * scale
+    fx_to_usd = mkt['usd_gbp'] if ccy == 'GBP' else 1.0
+    inst['_computed_mv'] = pv_base * scale * fx_to_usd
+    inst['_pricing_model'] = 'HW1F_trinomial_tree'
 
     sens = {}
     for bt in girr_tenors:
@@ -404,6 +408,8 @@ def calc_equity_delta(inst, mkt, cfg):
     mv = inst.get('market_value', 0)
     bucket = inst.get('eq_bucket', 8)
     ticker = inst.get('ticker', '')
+    inst['_computed_mv'] = mv
+    inst['_pricing_model'] = 'spot_x_shares'
     if mv == 0 or not ticker: return {}
     return {f"EQ_{bucket}_{ticker}": mv}
 
@@ -442,6 +448,9 @@ def calc_spx_option_delta(inst, mkt, cfg):
     bucket = inst.get('eq_bucket', 12)
     if T <= 0: return {}
     bsm_delta, _, _ = _bsm_greeks(S, K, T, r, q, sigma)
+    option_premium = _bsm_call(S, K, T, r, q, sigma)
+    inst['_computed_mv'] = float(inst['notional']) * mult * option_premium
+    inst['_pricing_model'] = 'BS_with_SPX_vol_surface'
     return {f"EQ_{bucket}_SPX": inst['notional'] * mult * bsm_delta}
 
 def calc_spx_option_vega(inst, mkt, cfg):
@@ -491,7 +500,7 @@ def calc_securitisation_csr_delta(inst, mkt, cfg):
 
     Methodology references:
       - MAR21: CS01 definition, 5 prescribed tenors
-      - Sec_Tranche_Curves sheet: manufactured tranche spread curve (Level 3)
+      - Sec_Tranche_Curves sheet (in FRTB SA/FRTB_Sec_Config.xlsx): manufactured tranche spread curve (Level 3)
       - sec_cashflows.project_tranche_bond: amortisation profile per pool type
       - QuantLib SpreadedLinearZeroInterpolatedTermStructure: pillar-based
             spread curve with linear interpolation in zero-rate space. Bumping a
@@ -543,7 +552,8 @@ def calc_securitisation_csr_delta(inst, mkt, cfg):
         if not tranche_curve:
             raise ValueError(
                 f"Sec position {inst_id} has no manufactured tranche spread curve "
-                f"in mkt['tranche_curves']. Check Sec_Tranche_Curves sheet."
+                f"in mkt['tranche_curves']. Check Sec_Tranche_Curves sheet "
+                f"in FRTB SA/FRTB_Sec_Config.xlsx."
             )
 
         bucket = inst.get('csr_sec_bucket', 1)
@@ -616,6 +626,8 @@ def calc_securitisation_csr_delta(inst, mkt, cfg):
 
         # ── Base PV ──
         pv_base = bond.NPV() * sign
+        inst['_computed_mv'] = pv_base
+        inst['_pricing_model'] = 'QL_FixedRateBond_tranche_curve'
         # ── DIAGNOSTIC 2 (temporary) ──
         _diag_n_cf = len(bond.cashflows())
         _diag_future_cf = sum(1 for cf in bond.cashflows() if cf.date() > val_ql)
@@ -761,6 +773,8 @@ def calc_securitisation_girr_delta(inst, mkt, cfg):
 
 def calc_commodity_trs_delta(inst, mkt, cfg, bcomtr_weights):
     n = inst['notional']
+    inst['_computed_mv'] = inst.get('market_value', 0)
+    inst['_pricing_model'] = 'leg_npv_trs'
     sens = {}
     for _, row in bcomtr_weights.iterrows():
         c = row['Commodity']; b = int(row['FRTB Bucket'])
@@ -798,6 +812,8 @@ def calc_commodity_trs_girr_delta(inst, mkt, cfg):
 
     bond, scale  = _build_ql_bond(notional, total_coupon, inst['maturity'], freq, inst.get('issue_date'))
     pv_base      = _price_bond_ql(bond, mkt['usd_handle'], 0)
+    inst['_computed_mv'] = pv_base * scale
+    inst['_pricing_model'] = 'leg_npv_trs'
 
     BUMP         = 0.0001
     girr_tenors  = cfg['girr_tenors']
@@ -807,7 +823,7 @@ def calc_commodity_trs_girr_delta(inst, mkt, cfg):
             continue
         bumped_handle = _build_bumped_curve(mkt['ql_val_date'], mkt['usd_rates'], bt)
         pv01 = (_price_bond_ql(bond, bumped_handle, 0) - pv_base) * scale / BUMP
-        
+
         if abs(pv01) > 0.01:
             sens[f"GIRR_USD_{bt}Y"] = pv01
 
@@ -850,6 +866,8 @@ def calc_xccy_usd_leg_girr(inst, mkt, cfg):
 
     bond, scale = _build_ql_bond(notional, coupon, inst['maturity'], freq, inst.get('issue_date'))
     pv_base = _price_bond_ql(bond, base_handle, 0)
+    inst['_computed_mv'] = pv_base * scale
+    inst['_pricing_model'] = 'leg_npv_xccy'
 
     sens = {}
     for bt in girr_tenors:
@@ -897,6 +915,8 @@ def calc_xccy_gbp_leg_girr(inst, mkt, cfg):
     # Build GBP leg as FixedRateBond on SONIA curve (GBP notional; convert to USD at end)
     bond, scale = _build_ql_bond(notional, coupon, inst['maturity'], freq, inst.get('issue_date'))
     pv_base = _price_bond_ql(bond, base_handle, 0)
+    inst['_computed_mv'] = pv_base * scale * fx
+    inst['_pricing_model'] = 'leg_npv_xccy'
 
     sens = {}
 
@@ -966,6 +986,8 @@ def calc_il_gilt_sensitivities(inst, mkt, cfg):
 
     bond, scale = _build_ql_bond(notional, coupon, inst['maturity'], 2, inst.get('issue_date'))
     pv_base = _price_bond_ql(bond, mkt['gbp_real_handle'], 0)
+    inst['_computed_mv'] = pv_base * scale * fx
+    inst['_pricing_model'] = 'QL_FixedRateBond_discount_curve'
 
     sens = {}
 

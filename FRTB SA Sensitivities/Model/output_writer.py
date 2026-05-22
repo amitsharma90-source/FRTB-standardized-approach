@@ -8,9 +8,17 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+from mv_decompose import SCHEMA_COLUMNS as MV_SCHEMA_COLUMNS
 
-def write_sensitivity_output(df: pd.DataFrame, output_path: str):
-    """Write sensitivity results to a formatted Excel file."""
+
+def write_sensitivity_output(df: pd.DataFrame, mv_rows: list[dict], output_path: str):
+    """Write sensitivity results to a formatted Excel file.
+
+    Produces three sheets:
+      * Sensitivities             (contract; byte-locked by qa_golden)
+      * Portfolio_MV_Decomposed   (contract; model-priced MV blotter)
+      * Summary                   (auxiliary; human review only)
+    """
     
     FONT = 'Arial'
     H_FONT = Font(bold=True, size=9, color='FFFFFF', name=FONT)
@@ -136,7 +144,11 @@ def write_sensitivity_output(df: pd.DataFrame, output_path: str):
     
     # Freeze panes: freeze ID + meta columns, and header rows
     ws.freeze_panes = ws.cell(row=3, column=2 + len(meta_cols))
-    
+
+    # Sheet 2 — Portfolio_MV_Decomposed (contract sheet, inserted between
+    # Sensitivities and Summary so the workbook order matches the contract).
+    _write_portfolio_mv_decomposed(wb, mv_rows)
+
     # Add summary sheet
     ws2 = wb.create_sheet("Summary")
     ws2.cell(row=1, column=1, value="FRTB SA Sensitivity Summary").font = Font(
@@ -171,8 +183,58 @@ def write_sensitivity_output(df: pd.DataFrame, output_path: str):
     
     ws2.column_dimensions['A'].width = 30
     ws2.column_dimensions['B'].width = 15
-    
+
     wb.save(output_path)
     print(f"Output saved: {output_path}")
-    print(f"  {len(df)} instruments × {len(all_cols)} columns")
+    print(f"  Sheet 1 'Sensitivities': {len(df)} instruments × {len(all_cols)} columns")
+    print(f"  Sheet 2 'Portfolio_MV_Decomposed': {len(mv_rows)} legs × {len(MV_SCHEMA_COLUMNS)} columns")
     print(f"  {len(active_sens)} active sensitivity columns")
+
+
+def _write_portfolio_mv_decomposed(wb: Workbook, mv_rows: list[dict]) -> None:
+    """Write the Portfolio_MV_Decomposed sheet using the 14-column schema
+    defined in `mv_decompose.SCHEMA_COLUMNS`.
+
+    Strict ordering: rows are pre-sorted by the orchestrator via
+    `mv_decompose.sort_rows`. Columns follow `SCHEMA_COLUMNS` exactly —
+    no extra columns, no reordering.
+    """
+    FONT = 'Arial'
+    H_FONT = Font(bold=True, size=9, color='FFFFFF', name=FONT)
+    H_FILL = PatternFill('solid', fgColor='1F4E79')
+    D_FONT = Font(size=9, name=FONT)
+    thin = Border(left=Side('thin'), right=Side('thin'),
+                  top=Side('thin'), bottom=Side('thin'))
+
+    ws = wb.create_sheet('Portfolio_MV_Decomposed')
+
+    for ci, col_name in enumerate(MV_SCHEMA_COLUMNS, 1):
+        cell = ws.cell(row=1, column=ci, value=col_name)
+        cell.font = H_FONT
+        cell.fill = H_FILL
+        cell.border = thin
+        cell.alignment = Alignment(horizontal='center', wrap_text=True)
+
+    for ri, leg in enumerate(mv_rows, 2):
+        for ci, col_name in enumerate(MV_SCHEMA_COLUMNS, 1):
+            cell = ws.cell(row=ri, column=ci, value=leg.get(col_name, ''))
+            cell.font = D_FONT
+            cell.border = thin
+            if col_name in ('MV_USD', 'Quantity/Notional'):
+                cell.number_format = '#,##0.00'
+                cell.alignment = Alignment(horizontal='right')
+            elif col_name in ('ID', 'parent_position_id'):
+                cell.alignment = Alignment(horizontal='right')
+            else:
+                cell.alignment = Alignment(horizontal='left', wrap_text=True)
+
+    widths = {
+        'ID': 10, 'parent_position_id': 14, 'decomposition_leg': 18,
+        'Issuer': 18, 'Security': 36, 'Position Type': 12, 'Issue Type': 14,
+        'Currency': 8, 'Long/Short': 9, 'Rating': 8, 'Seniority (DRC)': 14,
+        'Quantity/Notional': 16, 'MV_USD': 16, 'pricing_model': 30,
+    }
+    for ci, col_name in enumerate(MV_SCHEMA_COLUMNS, 1):
+        ws.column_dimensions[get_column_letter(ci)].width = widths.get(col_name, 12)
+    ws.row_dimensions[1].height = 28
+    ws.freeze_panes = ws.cell(row=2, column=4)
