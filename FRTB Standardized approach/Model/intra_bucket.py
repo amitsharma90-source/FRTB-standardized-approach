@@ -391,9 +391,15 @@ def compute_intra_bucket(ws_df: pd.DataFrame, cfg: dict,
 
     results = []
     for (kind, rc, bid), sub in df.groupby(["kind", "risk_class", "bucket_id"]):
-        Kb, Sb, n = _aggregate_one_bucket(sub, cfg, scen)
-        results.append(dict(kind=kind, risk_class=rc, bucket_id=bid,
-                            n_factors=n, Sb=Sb, Kb=Kb, scenario=scenario))
+        Kb, Sb, _ = _aggregate_one_bucket(sub, cfg, scen)
+        n_distinct = sub.apply(_factor_identity, axis=1).nunique()
+        n_position_rows = len(sub)
+        results.append(dict(
+            kind=kind, risk_class=rc, bucket_id=bid,
+            n_distinct_factors=int(n_distinct),
+            n_position_rows=int(n_position_rows),
+            n_factors=int(n_position_rows),    # legacy alias (kept for callers)
+            Sb=Sb, Kb=Kb, scenario=scenario))
     return pd.DataFrame(results).sort_values(
         ["kind", "risk_class", "bucket_id"]).reset_index(drop=True)
 

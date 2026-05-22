@@ -266,7 +266,10 @@ def main():
                           formatters={"charge": "{:,.2f}".format}))
     print(f"\n{'TOTAL':<40s} {win_res['total']:>15,.2f}")
 
-    out_dir = os.path.join(os.path.dirname(__file__), "output")
+    out_dir = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "Output data", "SA capital charge"
+    ))
+    os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, "FRTB_SA_Capital.xlsx")
     write_output(results, summary, ws_df, out_path)
     print(f"\nWrote: {out_path}")

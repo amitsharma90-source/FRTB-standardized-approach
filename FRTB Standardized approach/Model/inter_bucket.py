@@ -294,10 +294,18 @@ def compute_inter_bucket_with_trace(phase2_df: pd.DataFrame, cfg: dict,
             charge=Delta, alt_s_floor_used=floored, scenario=scenario))
 
         for i, b in enumerate(buckets):
+            row = sub.iloc[i]
+            # Prefer the new explicit columns from compute_intra_bucket_with_trace;
+            # fall back to legacy 'n_factors' if Phase 2 came from the non-trace path.
+            n_distinct = int(row["n_distinct_factors"]) if "n_distinct_factors" in row \
+                else int(row.get("n_factors", 0))
+            n_pos = int(row["n_position_rows"]) if "n_position_rows" in row \
+                else int(row.get("n_factors", 0))
             bucket_input_rows.append(dict(
                 scenario=scenario, kind=kind, risk_class=rc, bucket_id=b,
                 Sb=float(Sbs[i]), Kb=float(Kbs[i]),
-                n_factors=int(sub["n_factors"].iloc[i])))
+                n_distinct_factors=n_distinct,
+                n_position_rows=n_pos))
 
         if len(buckets) >= 2:
             labels = [f"{rc} | {b}" for b in buckets]

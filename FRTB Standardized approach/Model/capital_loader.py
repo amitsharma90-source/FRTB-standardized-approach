@@ -10,14 +10,13 @@ import re
 import os
 import pandas as pd
 
-SENS_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "Sensitivities calculator", "Sensitivity v10",
-    "files", "output", "FRTB_Sensitivities.xlsx",
-)
-CONFIG_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "Sensitivities calculator", "Sensitivity v10",
-    "files", "data", "MAR21_Config_RW_Corr.xlsx",
-)
+SENS_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "Output data", "Sensitivities output",
+    "FRTB_Sensitivities.xlsx",
+))
+CONFIG_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "Input data", "MAR21_Config_RW_Corr.xlsx",
+))
 
 META_COLS = ["ID", "Security", "Instrument_Type", "Sensitivity_Definition"]
 FLAG_COLS = [
